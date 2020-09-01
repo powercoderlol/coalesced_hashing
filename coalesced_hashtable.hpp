@@ -21,9 +21,8 @@ struct address_node_traits {
     enum {
         tail_flag = 0x80000000,
         head_flag = 0x40000000,
-        intermediate_flag = 0x20000000,
-        allocated_flag = 0x10000000,
-        all = 0xF0000000
+        allocated_flag = 0x20000000,
+        all = 0xE0000000
     };
     static inline uint32_t next(node_type* x) {
         return x->next;
@@ -43,9 +42,6 @@ struct address_node_traits {
     static inline void set_head(node_type* x) {
         x->prev |= head_flag;
     }
-    static inline void set_intermediate(node_type* x) {
-        x->prev |= intermediate_flag;
-    }
     static inline void set_allocated(node_type* x) {
         x->prev |= allocated_flag;
     }
@@ -56,7 +52,7 @@ struct address_node_traits {
         return 0 != (x->prev & head_flag);
     }
     static inline bool is_intermediate(node_type* x) {
-        return 0 != (x->prev & intermediate_flag);
+        return (!is_head(x) && !is_tail(x));
     }
     static inline bool is_allocated(node_type* x) {
         return 0 != (x->prev & allocated_flag);
@@ -73,12 +69,9 @@ struct address_node_traits {
         set_allocated(p);
         set_next(p, n_pos);
         set_prev(n, p_pos);
-        if(is_tail(p)) {
+        if(is_tail(p))
             reset_tail(p);
-            if(!is_head(p))
-                set_intermediate(p);
-            set_tail(n);
-        }
+        set_tail(n);
     }
     static inline void link_head(node_type* x, uint32_t pos) {
         link_(x, x, pos, pos);
@@ -95,7 +88,6 @@ struct ch_node_t : address_node_t {
     }
     value_type value;
 };
-
 
 // TODO: move allocator rebind to traits?
 template<class Key, class T>
@@ -151,8 +143,9 @@ public:
     coalesced_hashtable() = delete;
     coalesced_hashtable(coalesced_hashtable& other) = delete;
     explicit coalesced_hashtable(
-        size_t size, double address_factor = 0.86,
-        coalesced_insertion_mode mode = coalesced_insertion_mode::LISCH)
+        size_t size,
+        coalesced_insertion_mode mode = coalesced_insertion_mode::LISCH,
+        double address_factor = 0.86)
         : capacity_(size)
         , address_factor_(address_factor)
         , insertion_mode_(mode) {
@@ -160,10 +153,10 @@ public:
         // TODO: asserts
         address_region_ = static_cast<size_t>(capacity_ * address_factor_);
         cellar_ = static_cast<size_t>(capacity_ - address_region_);
-        table_ = allocator_traits::allocate(allocator_, capacity_);
-        cellar_offset_ = table_ + cellar_;
-        freetail_ = capacity_ - 1;
-        end_ = &table_[capacity_];
+        table_ = allocator_traits::allocate(allocator_, capacity_ + 1);
+        freetail_ = static_cast<uint32_t>(capacity_ - 1);
+        head_ = static_cast<uint32_t>(capacity_);
+        tail_ = head_;
     }
     ~coalesced_hashtable() {
         // ensure all objects was destructed
@@ -186,18 +179,34 @@ public:
         return &table_[pos];
     }
 
+    bool head_initialized() {
+        return (head_ != capacity_);
+    }
+
+    storage_ptr get_head() {
+        if(head_initialized())
+            return table_[head_];
+        return nullptr;
+    }
+
+    storage_ptr get_tail() {
+        return table_[tail_];
+    }
+
 private:
     allocator_t allocator_;
     storage_ptr table_{nullptr};
-    storage_ptr cellar_offset_{nullptr};
-    storage_ptr end_{nullptr};
-    storage_ptr head_{nullptr};
+    storage_ptr freelist_{nullptr};
+
     coalesced_insertion_mode insertion_mode_;
     double address_factor_{0.86};
     size_t cellar_{0};
     size_t address_region_{0};
     size_t capacity_{0};
-    size_t freetail_{0};
+
+    uint32_t freetail_{0};
+    uint32_t head_{0};
+    uint32_t tail_{0};
     size_t size_{0};
 };
 
@@ -287,20 +296,20 @@ public:
     coalesced_map() = delete;
     coalesced_map(coalesced_map& other) = delete;
     coalesced_map(size_t size) : storage_(size) {
+        link_freelist(storage_);
     }
 
     size_t size() const {
-        return storage_.size_;
+        return size_;
     }
 
-    [[nodiscard]] iterator begin() {
-        iterator(storage_, storage_.head_);
-    }
-
-    [[nodiscard]] iterator end() {
-        iterator(storage_, storage_.end_);
-    }
-
+    // [[nodiscard]] iterator begin() {
+    //     iterator(storage_, storage_.head_);
+    // }
+    //
+    // [[nodiscard]] iterator end() {
+    //     iterator(storage_, storage_.end_);
+    // }
 
     // TODO: return iterator
     // TODO: check insertion mode (storage_)
@@ -309,11 +318,19 @@ public:
         auto slot_ = get_slot_(key_);
         auto node = &storage_.table_[slot_];
         if(!node_traits::is_allocated(node)) {
-            storage_.construct_node(node, data);
+            construct(node, data);
+            // bucket
             node_traits::link_head(node, slot_);
-            if(storage_.head_ == nullptr)
-                storage_.head_ = node;
+            if(!storage_.head_initialized())
+                storage_.head_ = slot_;
+            link_to_table_tail(slot_);
+            ++buckets_size_;
             return true;
+        }
+        // search for bucket tail
+        while(!node_traits::is_tail(node)) {
+            slot_ = node_traits::next(node);
+            node = storage_.get_node(slot_);
         }
         switch(storage_.insertion_mode_) {
         case coalesced_insertion_mode::VICH:
@@ -335,8 +352,16 @@ public:
                         --free_index;
                         continue;
                     }
-                    storage_.construct_node(candidate_node, data);
-                    node_traits::link_(node, candidate_node, free_index, slot_);
+                    construct(candidate_node, data);
+                    auto next_node_pos = node_traits::next(node);
+                    auto next_node = storage_.get_node(next_node_pos);
+                    node_traits::link_(candidate_node, node, free_index, slot_);
+                    if(!node_traits::is_allocated(next_node))
+                        link_to_table_tail(free_index);
+                    else {
+                        node_traits::set_prev(next_node, free_index);
+                        node_traits::set_next(candidate_node, next_node_pos);
+                    }
                     storage_.freetail_ = --free_index;
                     return true;
                 }
@@ -347,6 +372,37 @@ public:
     }
 
 private:
+    static void link_freelist(storage_type& stor) {
+        auto* table = stor.table_;
+        auto border = (stor.capacity_ - 1);
+        for(int i = 1; i < border; ++i) {
+            table[i].next = i + 1;
+            table[i].prev = i - 1;
+        }
+        table[0].prev = 0;
+        table[0].next = 1;
+        table[border].prev = static_cast<uint32_t>(border - 1);
+        table[border].next = static_cast<uint32_t>(border);
+    }
+
+    void link_to_table_tail(uint32_t pos) {
+        auto node = &storage_.table_[pos];
+        auto tail_node = &storage_.table_[storage_.tail_];
+        if(!node_traits::is_allocated(tail_node)) {
+            // raw construct call to keep size valid
+            storage_.construct_node(tail_node);
+            node_traits::set_allocated(tail_node);
+            node_traits::set_next(node, storage_.tail_);
+            node_traits::set_prev(tail_node, pos);
+            return;
+        }
+        auto actual_tail = &storage_.table_[node_traits::prev(tail_node)];
+        node_traits::set_next(node, storage_.tail_);
+        node_traits::set_prev(node, node_traits::prev(tail_node));
+        node_traits::set_prev(tail_node, pos);
+        node_traits::set_next(actual_tail, pos);
+    }
+
     uint32_t get_slot_(const key_type& key) {
         return static_cast<uint32_t>(hash_(key));
     }
@@ -355,8 +411,16 @@ private:
         return hasher{}(key) % storage_.address_region_;
     }
 
+    template<class... Args>
+    void construct(node_type* ptr, Args&&... args) {
+        ++size_;
+        storage_.construct_node(ptr, std::forward<Args>(args)...);
+    }
+
 private:
     storage_type storage_;
+    size_t buckets_size_{0};
+    size_t size_{0};
 };
 
 } // namespace coalesced_hash
