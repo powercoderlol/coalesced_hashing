@@ -9,7 +9,7 @@
 #include <type_traits>
 // clang-format on
 
-namespace {
+namespace coalesced_hash {
 
 struct address_node_t {
     uint32_t prev = 0;
@@ -110,10 +110,6 @@ struct ch_node_traits : address_node_traits {
     }
 };
 
-} // namespace
-
-namespace coalesced_hash {
-
 /** Insert mode
  * Colliding elements are stored in the same table.
  * References create chains which are subject to so called coalescence.
@@ -127,7 +123,7 @@ namespace coalesced_hash {
 enum class coalesced_insertion_mode { LISCH, EISCH, LICH, EICH, VICH };
 
 // contiguous memory storage for coalesced hashtable
-template<class Node, class Alloc = std::allocator<Node>>
+template<class Node, class Alloc>
 class coalesced_hashtable {
     template<class Key, class T, class Hasher, class KeyEq, class Alloc>
     friend class coalesced_map;
@@ -185,12 +181,12 @@ public:
 
     storage_ptr get_head() {
         if(head_initialized())
-            return table_[head_];
+            return &table_[head_];
         return nullptr;
     }
 
     storage_ptr get_tail() {
-        return table_[tail_];
+        return &table_[tail_];
     }
 
 private:
@@ -211,50 +207,56 @@ private:
 };
 
 // TODO: const iterator
-template<class Node, class Traits>
+template<class Node, class Traits, class Storage>
 class ch_iterator_t {
 public:
     using node_type = Node;
     using node_traits = Traits;
+    using storage_type = Storage;
 
     using iterator_category = std::forward_iterator_tag;
     using value_type = typename node_traits::value_type;
     using difference_type = ptrdiff_t;
-    using pointer = node_type*;
-    using reference = node_type&;
-
-    using storage_type = coalesced_hashtable<node_type>;
+    using node_pointer = node_type*;
+    using node_reference = node_type&;
 
     ch_iterator_t() = default;
-    ch_iterator_t(const storage_type& stor, const pointer& p)
+    ch_iterator_t(storage_type& stor, node_pointer p)
         : storage_(stor), node_(p) {
     }
 
     ch_iterator_t& operator++() {
         auto pos = node_traits::next(node_);
-        node_ = storage_->get_node(pos);
+        node_ = storage_.get_node(pos);
         return (*this);
     }
 
-    reference operator*() const {
+    node_reference operator*() const {
         return (*node_);
     }
 
-    pointer operator->() const {
+    node_pointer operator->() const {
         return node_;
     }
 
     bool operator!=(const ch_iterator_t& rhs) const {
-        return (node_.value.second != rhs.value.second);
+        return (node_ != rhs.node_);
     }
 
     bool operator==(const ch_iterator_t& rhs) const {
         return !(*this != rhs);
     }
 
+    ch_iterator_t& operator=(const ch_iterator_t& rhs) {
+        if(rhs.node_ == node_)
+            return (*this);
+        node_ = rhs.node_;
+        return (*this);
+    }
+
 private:
-    const storage_type* storage_{nullptr};
-    pointer node_{nullptr};
+    storage_type& storage_{nullptr};
+    node_pointer node_{nullptr};
 };
 
 template<
@@ -280,9 +282,8 @@ class coalesced_map {
     using size_type = size_t;
     using difference_type = size_t;
 
-    using iterator_t = ch_iterator_t<node_type, node_traits>;
-    using const_iterator_t = ch_iterator_t<node_type, node_traits>;
-    using iterator = ch_iterator_t<node_type, node_traits>;
+    using storage_type = coalesced_hashtable<node_type, Alloc>;
+    using iterator = ch_iterator_t<node_type, node_traits, storage_type>;
     // using iterator = std::conditional_t<
     //     std::is_same_v<key_type, value_type>, typename iterator_t,
     //     typename const_iterator_t>;
@@ -290,26 +291,24 @@ class coalesced_map {
     // using local_iterator = implementation-defined ;
     // using const_local_iterator = implementation-defined ;
 
-    using storage_type = coalesced_hashtable<node_type, Alloc>;
-
 public:
     coalesced_map() = delete;
     coalesced_map(coalesced_map& other) = delete;
     coalesced_map(size_t size) : storage_(size) {
-        link_freelist(storage_);
+        // link_freelist(storage_);
     }
 
     size_t size() const {
         return size_;
     }
 
-    // [[nodiscard]] iterator begin() {
-    //     iterator(storage_, storage_.head_);
-    // }
-    //
-    // [[nodiscard]] iterator end() {
-    //     iterator(storage_, storage_.end_);
-    // }
+    [[nodiscard]] iterator begin() {
+        return iterator(storage_, storage_.get_head());
+    }
+
+    [[nodiscard]] iterator end() {
+        return iterator(storage_, storage_.get_tail());
+    }
 
     // TODO: return iterator
     // TODO: check insertion mode (storage_)
