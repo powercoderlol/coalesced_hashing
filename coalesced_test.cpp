@@ -25,6 +25,15 @@ TEST(coalesced_hashtable_test, simple_insert) {
     EXPECT_EQ(cmap_.insert({42, 42}), false);
 }
 
+TEST(coalesced_hashtable_test, find_member_method) {
+    coalesced_hash::coalesced_map<int, int> cmap_(10);
+    cmap_.insert({2, 8});
+    cmap_.insert({3, 10});
+    cmap_.insert({9, 12});
+    auto test_it = cmap_.find(3);
+    EXPECT_EQ(test_it->value.second, 10);
+}
+
 TEST(coalesced_hashtable_test, stl_find_if) {
     coalesced_hash::coalesced_map<int, int> cmap_(10);
     cmap_.insert({2, 8});

@@ -97,12 +97,12 @@ struct ch_node_traits : address_node_traits {
     using mapped_type = T;
     using value_type = std::pair<const Key, T>;
 
-    static const key_type& key(const node_type& node) {
-        return (node.value.first);
+    static const key_type& key(const node_type* node) {
+        return (node->value.first);
     }
 
-    static const mapped_type& value(const node_type& node) {
-        return (node.value.second);
+    static const mapped_type& value(const node_type* node) {
+        return (node->value.second);
     }
 
     static const key_type& key(const value_type& data) {
@@ -308,6 +308,22 @@ public:
 
     [[nodiscard]] iterator end() {
         return iterator(storage_, storage_.get_tail());
+    }
+
+    [[nodiscard]] iterator find(const key_type& key) {
+        auto slot = get_slot_(key);
+        auto node = storage_.get_node(slot);
+        if(!node_traits::is_head(node))
+            return iterator(storage_, storage_.get_head());
+        if(key_equal()(node_traits::key(node), key))
+            return iterator(storage_, node);
+        while(!node_traits::is_tail(node)) {
+            slot = node_traits::next(node);
+            node = storage_.get_node(slot);
+            if(key_equal()(node_traits::key(node), key))
+                return iterator(storage_, node);
+        }
+        return iterator(storage_, storage_.get_head());
     }
 
     // TODO: return iterator
