@@ -284,6 +284,8 @@ class coalesced_map {
 
     using storage_type = coalesced_hashtable<node_type, Alloc>;
     using iterator = ch_iterator_t<node_type, node_traits, storage_type>;
+
+    using pair_ib = std::pair<iterator, bool>;
     // using iterator = std::conditional_t<
     //     std::is_same_v<key_type, value_type>, typename iterator_t,
     //     typename const_iterator_t>;
@@ -326,9 +328,8 @@ public:
         return iterator(storage_, storage_.get_head());
     }
 
-    // TODO: return iterator
     // TODO: check insertion mode (storage_)
-    bool insert(value_type&& data) {
+    pair_ib insert(value_type&& data) {
         auto key_ = node_traits::key(data);
         auto slot_ = get_slot_(key_);
         auto node = &storage_.table_[slot_];
@@ -340,7 +341,7 @@ public:
                 storage_.head_ = slot_;
             link_to_table_tail(slot_);
             ++buckets_size_;
-            return true;
+            return pair_ib(iterator(storage_, node), true);
         }
         // search for bucket tail
         while(!node_traits::is_tail(node)) {
@@ -378,12 +379,12 @@ public:
                         node_traits::set_next(candidate_node, next_node_pos);
                     }
                     storage_.freetail_ = --free_index;
-                    return true;
+                    return pair_ib(iterator(storage_, candidate_node), true);
                 }
             }
             break;
         }
-        return false;
+        return pair_ib(iterator(storage_, storage_.get_tail()), false);
     }
 
 private:
