@@ -114,13 +114,10 @@ struct ch_node_traits : address_node_traits {
  * Colliding elements are stored in the same table.
  * References create chains which are subject to so called coalescence.
  *
- * LISCH (late insert standard coalesced hashing)
- * EISCH (early insert standard coalesced hashing)
- * using additional cellar space
  * LICH (late insert coalesced hashing)
  * EICH (early insert coalesced hashing)
  * VICH (variable insert coalesced hashing) */
-enum class coalesced_insertion_mode { LISCH, EISCH, LICH, EICH, VICH };
+enum class coalesced_insertion_mode { LICH, EICH, VICH };
 
 // contiguous memory storage for coalesced hashtable
 template<class Node, class Alloc>
@@ -140,7 +137,7 @@ public:
     coalesced_hashtable(coalesced_hashtable& other) = delete;
     explicit coalesced_hashtable(
         size_t size,
-        coalesced_insertion_mode mode = coalesced_insertion_mode::LISCH,
+        coalesced_insertion_mode mode = coalesced_insertion_mode::LICH,
         double address_factor = 0.86)
         : capacity_(size)
         , address_factor_(address_factor)
@@ -286,18 +283,23 @@ class coalesced_map {
     using iterator = ch_iterator_t<node_type, node_traits, storage_type>;
 
     using pair_ib = std::pair<iterator, bool>;
-    // using iterator = std::conditional_t<
-    //     std::is_same_v<key_type, value_type>, typename iterator_t,
-    //     typename const_iterator_t>;
-    // using const_iterator = implementation-defined ;
-    // using local_iterator = implementation-defined ;
-    // using const_local_iterator = implementation-defined ;
 
 public:
     coalesced_map() = delete;
     coalesced_map(coalesced_map& other) = delete;
-    coalesced_map(size_t size) : storage_(size) {
-        // link_freelist(storage_);
+    coalesced_map(
+        size_t size,
+        coalesced_insertion_mode mode = coalesced_insertion_mode::LICH,
+        double address_factor = 0.86)
+        : storage_(size, mode, address_factor) {
+        //link_freelist(storage_);
+    }
+
+    bool set_insertion_mode(coalesced_insertion_mode mode) {
+        if(size_ > 0)
+            return false;
+        storage_.insertion_mode_ = mode;
+        return true;
     }
 
     size_t size() const {
@@ -334,7 +336,7 @@ public:
         auto slot_ = get_slot_(key_);
         auto node = &storage_.table_[slot_];
         if(!node_traits::is_allocated(node)) {
-            construct(node, data);
+            construct_(node, data);
             // bucket
             node_traits::link_head(node, slot_);
             if(!storage_.head_initialized())
@@ -351,13 +353,9 @@ public:
         switch(storage_.insertion_mode_) {
         case coalesced_insertion_mode::VICH:
             [[fallthrough]];
-        case coalesced_insertion_mode::LICH:
-            [[fallthrough]];
         case coalesced_insertion_mode::EICH:
             [[fallthrough]];
-        case coalesced_insertion_mode::EISCH:
-            [[fallthrough]];
-        case coalesced_insertion_mode::LISCH:
+        case coalesced_insertion_mode::LICH:
             // cellar_ + address_region_ late insert
             auto free_index = static_cast<uint32_t>(storage_.freetail_);
             auto candidate_node = &storage_.table_[free_index];
@@ -368,7 +366,7 @@ public:
                         --free_index;
                         continue;
                     }
-                    construct(candidate_node, data);
+                    construct_(candidate_node, data);
                     auto next_node_pos = node_traits::next(node);
                     auto next_node = storage_.get_node(next_node_pos);
                     node_traits::link_(candidate_node, node, free_index, slot_);
@@ -428,15 +426,20 @@ private:
     }
 
     template<class... Args>
-    void construct(node_type* ptr, Args&&... args) {
+    void construct_(node_type* ptr, Args&&... args) {
         ++size_;
         storage_.construct_node(ptr, std::forward<Args>(args)...);
+    }
+
+    void rehash_() {
+        // TODO
     }
 
 private:
     storage_type storage_;
     size_t buckets_size_{0};
     size_t size_{0};
+    size_t lookup_depth = 2;
 };
 
 } // namespace coalesced_hash

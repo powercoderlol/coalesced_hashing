@@ -46,6 +46,8 @@ TEST(coalesced_hashtable_test, stl_find_if) {
     EXPECT_EQ(test_it->value.second, 10);
 }
 
+//TODO: perfomance tests
+
 int main(int argc, char* argv[]) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
