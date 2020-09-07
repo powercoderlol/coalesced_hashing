@@ -46,7 +46,30 @@ TEST(coalesced_hashtable_test, stl_find_if) {
     EXPECT_EQ(test_it->value.second, 10);
 }
 
-//TODO: perfomance tests
+TEST(coalesced_hashtable_test, early_insertion) {
+    coalesced_hash::coalesced_map<int, int> cmap_(
+        10, coalesced_hash::coalesced_insertion_mode::EICH);
+    cmap_.insert({3, 10});
+    cmap_.insert({9, 12});
+    cmap_.insert({2, 42});
+    cmap_.insert({2, 420});
+    cmap_.insert({2, 227});
+    cmap_.insert({2, 5});
+    for(const auto& val : cmap_) {
+        std::cout << val.value.first << " " << val.value.second << '\n';
+    }
+    auto iter = cmap_.find(2);
+    EXPECT_EQ(iter->value.second, 42);
+    ++iter;
+    EXPECT_EQ(iter->value.second, 5);
+    ++iter;
+    EXPECT_EQ(iter->value.second, 227);
+    ++iter;
+    EXPECT_EQ(iter->value.second, 420);
+    EXPECT_EQ(coalesced_hash::address_node_traits::is_tail(&*iter), true);
+}
+
+// TODO: performance tests
 
 int main(int argc, char* argv[]) {
     ::testing::InitGoogleTest(&argc, argv);

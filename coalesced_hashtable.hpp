@@ -147,7 +147,9 @@ public:
         address_region_ = static_cast<size_t>(capacity_ * address_factor_);
         cellar_ = static_cast<size_t>(capacity_ - address_region_);
         table_ = allocator_traits::allocate(allocator_, capacity_ + 1);
-        freetail_ = static_cast<uint32_t>(capacity_ - 1);
+        freetail_ = (mode == coalesced_insertion_mode::LICH)
+            ? static_cast<uint32_t>(capacity_ - 1)
+            : 0;
         head_ = static_cast<uint32_t>(capacity_);
         tail_ = head_;
     }
@@ -256,6 +258,7 @@ private:
     node_pointer node_{nullptr};
 };
 
+// TODO: move mode to template parameter
 template<
     class Key, class T, class Hasher = std::hash<Key>,
     class KeyEq = std::equal_to<Key>,
@@ -282,6 +285,7 @@ class coalesced_map {
     using storage_type = coalesced_hashtable<node_type, Alloc>;
     using iterator = ch_iterator_t<node_type, node_traits, storage_type>;
 
+    // not multimap
     using pair_ib = std::pair<iterator, bool>;
 
 public:
@@ -292,7 +296,8 @@ public:
         coalesced_insertion_mode mode = coalesced_insertion_mode::LICH,
         double address_factor = 0.86)
         : storage_(size, mode, address_factor) {
-        //link_freelist(storage_);
+        // if(mode == coalesced_insertion_mode::EICH)
+        //     link_freelist(storage_);
     }
 
     bool set_insertion_mode(coalesced_insertion_mode mode) {
@@ -300,6 +305,18 @@ public:
             return false;
         storage_.insertion_mode_ = mode;
         return true;
+    }
+
+    double load_factor() const {
+        return float(size_) / float(buckets_count_);
+    }
+
+    double max_load_factor() const {
+        return max_load_factor_;
+    }
+
+    void max_load_factor(double max_lf) {
+        max_load_factor_ = max_lf;
     }
 
     size_t size() const {
@@ -335,33 +352,88 @@ public:
         auto key_ = node_traits::key(data);
         auto slot_ = get_slot_(key_);
         auto node = &storage_.table_[slot_];
+        auto candidate_node = node;
+        auto early_position = slot_;
+        uint32_t free_index = 0;
+        auto probe_counter = lookup_depth;
         if(!node_traits::is_allocated(node)) {
             construct_(node, data);
-            // bucket
             node_traits::link_head(node, slot_);
             if(!storage_.head_initialized())
                 storage_.head_ = slot_;
             link_to_table_tail(slot_);
-            ++buckets_size_;
+            ++buckets_count_;
             return pair_ib(iterator(storage_, node), true);
         }
-        // search for bucket tail
+        // TODO: multimap
+        // if(key_equal()(node_traits::key(node), key_))
+        //    return pair_ib(iterator(storage_, node), true);
         while(!node_traits::is_tail(node)) {
             slot_ = node_traits::next(node);
             node = storage_.get_node(slot_);
+            // TODO: multimap
+            // if(key_equal()(node_traits::key(node), key_))
+            //    return pair_ib(iterator(storage_, node), true);
         }
         switch(storage_.insertion_mode_) {
         case coalesced_insertion_mode::VICH:
             [[fallthrough]];
         case coalesced_insertion_mode::EICH:
-            [[fallthrough]];
+            free_index = static_cast<uint32_t>(early_position);
+            candidate_node = storage_.get_node(free_index);
+            while(node_traits::is_allocated(candidate_node)
+                  && (probe_counter != 0)) {
+                ++free_index;
+                --probe_counter;
+                candidate_node = storage_.get_node(free_index);
+            }
+            if(!node_traits::is_allocated(candidate_node)) {
+                construct_(candidate_node, data);
+                auto root_node = storage_.get_node(early_position);
+                auto next_node_pos = node_traits::next(root_node);
+                auto next_node = storage_.get_node(next_node_pos);
+                node_traits::link_(
+                    candidate_node, root_node, free_index, early_position);
+                if(!node_traits::is_allocated(next_node)) {
+                    link_to_table_tail(free_index);
+                }
+                else {
+                    node_traits::set_next(candidate_node, next_node_pos);
+                    node_traits::set_prev(next_node, free_index);
+                }
+                return pair_ib(iterator(storage_, candidate_node), true);
+            }
+            free_index = static_cast<uint32_t>(storage_.freetail_);
+            if(free_index >= storage_.capacity_)
+                break;
+            while(free_index < storage_.capacity_) {
+                candidate_node = storage_.get_node(free_index);
+                if(node_traits::is_allocated(candidate_node)) {
+                    ++free_index;
+                    continue;
+                }
+                construct_(candidate_node, data);
+                auto root_node = storage_.get_node(early_position);
+                auto next_node_pos = node_traits::next(root_node);
+                auto next_node = storage_.get_node(next_node_pos);
+                node_traits::link_(
+                    candidate_node, root_node, free_index, early_position);
+                if(!node_traits::is_allocated(next_node)) {
+                    link_to_table_tail(free_index);
+                }
+                else {
+                    node_traits::set_next(candidate_node, next_node_pos);
+                    node_traits::set_prev(next_node, free_index);
+                }
+                return pair_ib(iterator(storage_, candidate_node), true);
+            }
+            break;
         case coalesced_insertion_mode::LICH:
             // cellar_ + address_region_ late insert
-            auto free_index = static_cast<uint32_t>(storage_.freetail_);
-            auto candidate_node = &storage_.table_[free_index];
+            free_index = static_cast<uint32_t>(storage_.freetail_);
             if(free_index > 0) {
                 while(free_index > 0) {
-                    candidate_node = &storage_.table_[free_index];
+                    candidate_node = storage_.get_node(free_index);
                     if(node_traits::is_allocated(candidate_node)) {
                         --free_index;
                         continue;
@@ -429,6 +501,7 @@ private:
     void construct_(node_type* ptr, Args&&... args) {
         ++size_;
         storage_.construct_node(ptr, std::forward<Args>(args)...);
+        node_traits::set_allocated(ptr);
     }
 
     void rehash_() {
@@ -437,8 +510,9 @@ private:
 
 private:
     storage_type storage_;
-    size_t buckets_size_{0};
-    size_t size_{0};
+    size_t buckets_count_ = 0;
+    size_t max_load_factor_ = 1;
+    size_t size_ = 0;
     size_t lookup_depth = 2;
 };
 
