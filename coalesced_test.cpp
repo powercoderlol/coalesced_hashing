@@ -55,9 +55,6 @@ TEST(coalesced_hashtable_test, early_insertion) {
     cmap_.insert({2, 420});
     cmap_.insert({2, 227});
     cmap_.insert({2, 5});
-    for(const auto& val : cmap_) {
-        std::cout << val.value.first << " " << val.value.second << '\n';
-    }
     auto iter = cmap_.find(2);
     EXPECT_EQ(iter->value.second, 42);
     ++iter;

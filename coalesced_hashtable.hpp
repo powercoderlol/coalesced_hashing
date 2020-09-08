@@ -122,12 +122,13 @@ enum class coalesced_insertion_mode { LICH, EICH, VICH };
 // contiguous memory storage for coalesced hashtable
 template<class Node, class Alloc>
 class coalesced_hashtable {
-    template<class Key, class T, class Hasher, class KeyEq, class Alloc>
+    template<class Key, class T, class Hasher, class KeyEq, class Alloc, bool IsMulti>
     friend class coalesced_map;
 
     using node_type = Node;
     using storage_ptr = node_type*;
 
+    using size_type = uint32_t;
     using allocator_t =
         typename std::allocator_traits<Alloc>::template rebind_alloc<node_type>;
     using allocator_traits = std::allocator_traits<allocator_t>;
@@ -136,7 +137,7 @@ public:
     coalesced_hashtable() = delete;
     coalesced_hashtable(coalesced_hashtable& other) = delete;
     explicit coalesced_hashtable(
-        size_t size,
+        size_type size,
         coalesced_insertion_mode mode = coalesced_insertion_mode::LICH,
         double address_factor = 0.86)
         : capacity_(size)
@@ -144,8 +145,8 @@ public:
         , insertion_mode_(mode) {
         // TODO: rounding for parameters
         // TODO: asserts
-        address_region_ = static_cast<size_t>(capacity_ * address_factor_);
-        cellar_ = static_cast<size_t>(capacity_ - address_region_);
+        address_region_ = static_cast<size_type>(capacity_ * address_factor_);
+        cellar_ = static_cast<size_type>(capacity_ - address_region_);
         table_ = allocator_traits::allocate(allocator_, capacity_ + 1);
         freetail_ = (mode == coalesced_insertion_mode::LICH)
             ? static_cast<uint32_t>(capacity_ - 1)
@@ -195,14 +196,14 @@ private:
 
     coalesced_insertion_mode insertion_mode_;
     double address_factor_{0.86};
-    size_t cellar_{0};
-    size_t address_region_{0};
-    size_t capacity_{0};
+    size_type cellar_{0};
+    size_type address_region_{0};
+    size_type capacity_{0};
 
     uint32_t freetail_{0};
     uint32_t head_{0};
     uint32_t tail_{0};
-    size_t size_{0};
+    uint32_t size_{0};
 };
 
 // TODO: const iterator
@@ -222,6 +223,12 @@ public:
     ch_iterator_t() = default;
     ch_iterator_t(storage_type& stor, node_pointer p)
         : storage_(stor), node_(p) {
+    }
+
+    ch_iterator_t& operator--() {
+        auto pos = node_traits::prev(node_);
+        node_ = storage_.get_node(pos);
+        return (*this);
     }
 
     ch_iterator_t& operator++() {
@@ -262,7 +269,7 @@ private:
 template<
     class Key, class T, class Hasher = std::hash<Key>,
     class KeyEq = std::equal_to<Key>,
-    class Alloc = std::allocator<std::pair<const Key, T>>>
+    class Alloc = std::allocator<std::pair<const Key, T>>, bool IsMulti = false>
 class coalesced_map {
     using key_equal = KeyEq;
     using hasher = Hasher;
@@ -279,7 +286,7 @@ class coalesced_map {
         typename std::allocator_traits<allocator_t>::const_pointer;
     using reference = value_type&;
     using const_reference = const value_type&;
-    using size_type = size_t;
+    using size_type = uint32_t;
     using difference_type = size_t;
 
     using storage_type = coalesced_hashtable<node_type, Alloc>;
@@ -288,16 +295,25 @@ class coalesced_map {
     // not multimap
     using pair_ib = std::pair<iterator, bool>;
 
+    enum {
+        min_buckets = 8,
+        multi = IsMulti
+    };
+
 public:
     coalesced_map() = delete;
     coalesced_map(coalesced_map& other) = delete;
     coalesced_map(
-        size_t size,
+        size_type size,
         coalesced_insertion_mode mode = coalesced_insertion_mode::LICH,
         double address_factor = 0.86)
         : storage_(size, mode, address_factor) {
         // if(mode == coalesced_insertion_mode::EICH)
         //     link_freelist(storage_);
+    }
+
+    coalesced_insertion_mode mode() const {
+        return storage_.insertion_mode_;
     }
 
     bool set_insertion_mode(coalesced_insertion_mode mode) {
@@ -307,8 +323,12 @@ public:
         return true;
     }
 
+    size_type bucket_count() const {
+        return storage_.capacity_;
+    }
+
     double load_factor() const {
-        return float(size_) / float(buckets_count_);
+        return float(size()) / float(bucket_count());
     }
 
     double max_load_factor() const {
@@ -317,6 +337,10 @@ public:
 
     void max_load_factor(double max_lf) {
         max_load_factor_ = max_lf;
+    }
+
+    bool empty() const {
+        return (size_ == 0);
     }
 
     size_t size() const {
@@ -362,7 +386,6 @@ public:
             if(!storage_.head_initialized())
                 storage_.head_ = slot_;
             link_to_table_tail(slot_);
-            ++buckets_count_;
             return pair_ib(iterator(storage_, node), true);
         }
         // TODO: multimap
@@ -454,6 +477,7 @@ public:
             }
             break;
         }
+        check_size_();
         return pair_ib(iterator(storage_, storage_.get_tail()), false);
     }
 
@@ -504,16 +528,34 @@ private:
         node_traits::set_allocated(ptr);
     }
 
-    void rehash_() {
-        // TODO
+    void check_size_() {
+        if(max_load_factor() < load_factor()) {
+            size_type new_size = bucket_count() * 2;
+            rehash_(new_size);
+        }
+    }
+
+    void rehash_(size_type new_capacity) {
+        coalesced_insertion_mode mode_ = mode();
+        storage_type new_storage(new_capacity, mode_);
+        auto last = end();
+        for(--last;;) {
+            auto iter = begin();
+            bool done = (last == iter);
+            // insert(*iter, iter)
+            // TODO: call destruct on prev node
+            // TODO: gracefully exchange storage
+            if(done)
+                break;
+        }
     }
 
 private:
     storage_type storage_;
-    size_t buckets_count_ = 0;
-    size_t max_load_factor_ = 1;
-    size_t size_ = 0;
-    size_t lookup_depth = 2;
+    double max_load_factor_ = 1;
+    size_type max_size_ = 0;
+    size_type size_ = 0;
+    size_type lookup_depth = 2;
 };
 
 } // namespace coalesced_hash
